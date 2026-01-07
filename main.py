@@ -51,7 +51,7 @@ class PunjabPowerSupply:
                     return district['id'], None
 
         print(f"🌤 Fetching weather for {len(self.districts_with_lat_lon)} districts...")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             # Create all tasks
             tasks = [fetch_one_district(client, d) for d in self.districts_with_lat_lon]
             # Execute them in parallel (obeying the self.limit semaphore)
@@ -64,16 +64,48 @@ class PunjabPowerSupply:
         return weather_map
 
     async def fetch_status_per_subdivision(self, client, subdivision_id, district_weather):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         async with self.limit:
-            print(f"Fetching for subdivision_id: {subdivision_id}",end="\r", flush=True)
-            power_status = await client.get(f"{self.default_powercut_url}{subdivision_id}")
-            if power_status.text == '({"0":{"status":"ok","reason":"All seems OK"}})':
-                self.current_power_status.append({'id':subdivision_id, 'status': 'power_running', 'checked_on':datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'temperature': district_weather['temp'], 'precipitation': district_weather['precip'], 'wind_speed': district_weather['wind'], 'wmo_code': district_weather['wmo_code']})
-                pass
-            else:
-                print(f'Power cut found ! at subdivision: {subdivision_id}')
-                self.current_power_status.append({'id':subdivision_id, 'status': power_status.text, 'checked_on':datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'temperature': district_weather['temp'], 'precipitation': district_weather['precip'], 'wind_speed': district_weather['wind'], 'wmo_code': district_weather['wmo_code']})
+            try:
+                # print(f"Fetching for subdivision_id: {subdivision_id}", end="\r", flush=True)
+                resp = await client.get(f"{self.default_powercut_url}{subdivision_id}", headers=headers)
+                
+                # If the API returns an error code (403, 429, 500), don't treat it as a power cut
+                if resp.status_code != 200:
+                    return
 
+                text = resp.text
+                
+                # Improved detection: Check if it's the "OK" response
+                if '"status":"ok"' in text and '"reason":"All seems OK"' in text:
+                    self.current_power_status.append({
+                        'id': subdivision_id, 
+                        'power_available': True, 
+                        'checked_on': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                        'temperature': district_weather['temp'] if district_weather else None,
+                        'precipitation': district_weather['precip'] if district_weather else None,
+                        'wind_speed': district_weather['wind'] if district_weather else None,
+                        'wmo_code': district_weather['wmo_code'] if district_weather else None,
+                        'status': 'power_running' # Temporary tag for parser
+                    })
+                else:
+                    # Double check it looks like actual outage data before printing
+                    if '"feeder"' in text:
+                        print(f'⚡ Actual Power cut found at subdivision: {subdivision_id}')
+                        self.current_power_status.append({
+                            'id': subdivision_id, 
+                            'status': text, 
+                            'checked_on': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                            'temperature': district_weather['temp'] if district_weather else None,
+                            'precipitation': district_weather['precip'] if district_weather else None,
+                            'wind_speed': district_weather['wind'] if district_weather else None,
+                            'wmo_code': district_weather['wmo_code'] if district_weather else None
+                        })
+            except Exception as e:
+                # If a request fails, we just skip it rather than crashing the whole run
+                pass
     
     # Get district details from subdivision ID
     async def get_subdivision_info(self, target_id):
@@ -178,7 +210,7 @@ class PunjabPowerSupply:
         # 1. Get the weather data first
         weather_data = await self.fetch_weather_for_districts()
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             tasks = []
             for district in self.districts:
                 # no_districts+=1
