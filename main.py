@@ -25,7 +25,7 @@ class PunjabPowerSupply:
             print("❌ ERROR: PSPCL_TOKEN_ID is missing!")
         
         # Set to 20 to stay within server 'comfort zones'
-        self.limit = asyncio.Semaphore(20)
+        self.limit = asyncio.Semaphore(40)
 
         with open(self.json_file,'r')as file:
             self.districts = json.load(file)
@@ -217,7 +217,7 @@ class PunjabPowerSupply:
         # 1. Get the weather data first
         weather_data = await self.fetch_weather_for_districts()
 
-        limits = httpx.Limits(max_keepalive_connections=20, max_connections=30)
+        limits = httpx.Limits(max_keepalive_connections=40, max_connections=80)
 
         async with httpx.AsyncClient(
             verify=False, 
