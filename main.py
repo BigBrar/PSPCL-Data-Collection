@@ -251,7 +251,7 @@ class PunjabPowerSupply:
             print(f"⚡ Outages Detected: {outages}")
             # print(f"No. of subdivisions facing power cuts currently = {len(self.current_power_status)}")
             print('saving results !!!')
-            # await self.save_current_report()
+            await self.save_current_report()
             print("DONE")
 
 
