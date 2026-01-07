@@ -19,8 +19,9 @@ class PunjabPowerSupply:
         self.default_powercut_url = f"https://distribution.pspcl.in/returns/module.php?to=NCC.apiGetOfflineFeedersinSD&token={self.pspcl_token_id}&sdid="
         self.json_file = "district+divisions+subdivisions.json"
         self.current_power_status = []
-        self.limit = asyncio.Semaphore(10)
         print(f"DEBUG: Token ID is {self.pspcl_token_id[:5]}***") # Only print first 5 chars for safety
+        self.limit = asyncio.Semaphore(10)
+
         with open(self.json_file,'r')as file:
             self.districts = json.load(file)
         
@@ -104,8 +105,6 @@ class PunjabPowerSupply:
                             'wmo_code': district_weather['wmo_code'] if district_weather else None
                         })
             except Exception as e:
-                print(f"⚠️ Request failed for subdivision {subdivision_id}")
-                print(f'Actual error: {repr(e)}') # Change this to repr(e)
                 # If a request fails, we just skip it rather than crashing the whole run
                 pass
     
@@ -212,15 +211,7 @@ class PunjabPowerSupply:
         # 1. Get the weather data first
         weather_data = await self.fetch_weather_for_districts()
 
-        # Define a custom limits and transport to prevent "hammering" the server
-        limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-
-        async with httpx.AsyncClient(
-        verify=False, 
-        timeout=httpx.Timeout(30.0, connect=60.0), # Long connection timeout
-        limits=limits,
-        follow_redirects=True
-    ) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             tasks = []
             for district in self.districts:
                 # no_districts+=1
@@ -233,14 +224,14 @@ class PunjabPowerSupply:
                         for subdivision in division['subdivisions']:
                             tasks.append(self.fetch_status_per_subdivision(client, subdivision['id'], district_weather) )
                     except Exception as e:
-                        # print("ERROR ",e)
                         pass
+                    # print("ERROR ",e)
                     # print(division)
             
             results = await asyncio.gather(*tasks)
             print(f"No. of subdivisions facing power cuts currently = {len(self.current_power_status)}")
             print('saving results !!!')
-            # await self.save_current_report()
+            await self.save_current_report()
             print("DONE")
 
 
