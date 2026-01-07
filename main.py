@@ -104,6 +104,8 @@ class PunjabPowerSupply:
                             'wmo_code': district_weather['wmo_code'] if district_weather else None
                         })
             except Exception as e:
+                print(f"⚠️ Request failed for subdivision {subdivision_id}")
+                print(f'Actual error: {e}')
                 # If a request fails, we just skip it rather than crashing the whole run
                 pass
     
@@ -210,7 +212,7 @@ class PunjabPowerSupply:
         # 1. Get the weather data first
         weather_data = await self.fetch_weather_for_districts()
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(verify=False, timeout=30.0, follow_redirects=True) as client:
             tasks = []
             for district in self.districts:
                 # no_districts+=1
@@ -223,8 +225,8 @@ class PunjabPowerSupply:
                         for subdivision in division['subdivisions']:
                             tasks.append(self.fetch_status_per_subdivision(client, subdivision['id'], district_weather) )
                     except Exception as e:
+                        print("ERROR ",e)
                         pass
-                    # print("ERROR ",e)
                     # print(division)
             
             results = await asyncio.gather(*tasks)
