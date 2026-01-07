@@ -19,8 +19,13 @@ class PunjabPowerSupply:
         self.default_powercut_url = f"https://distribution.pspcl.in/returns/module.php?to=NCC.apiGetOfflineFeedersinSD&token={self.pspcl_token_id}&sdid="
         self.json_file = "district+divisions+subdivisions.json"
         self.current_power_status = []
-        print(f"DEBUG: Token ID is {self.pspcl_token_id[:5]}***") # Only print first 5 chars for safety
-        self.limit = asyncio.Semaphore(25)
+        if self.pspcl_token_id:
+            print(f"DEBUG: Token ID is {self.pspcl_token_id[:5]}***")
+        else:
+            print("❌ ERROR: PSPCL_TOKEN_ID is missing!")
+        
+        # Set to 20 to stay within server 'comfort zones'
+        self.limit = asyncio.Semaphore(20)
 
         with open(self.json_file,'r')as file:
             self.districts = json.load(file)
@@ -39,8 +44,13 @@ class PunjabPowerSupply:
                 lat, lon = district['lat'], district['lon']
                 url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,precipitation,weather_code,wind_speed_10m&forecast_days=1"
                 try:
-                    resp = await client.get(url, timeout=10)
-                    data = resp.json()['current']
+                    resp = await client.get(url, timeout=15)
+                    if resp.status_code != 200:
+                        return district['id'], None
+                    
+                    data = resp.json().get('current')
+                    if not data: return district['id'], None
+
                     return district['id'], {
                         "temp": data['temperature_2m'],
                         "precip": data['precipitation'],
@@ -48,7 +58,7 @@ class PunjabPowerSupply:
                         "wmo_code": data['weather_code']
                     }
                 except Exception as e:
-                    print(f"⚠️ Weather failed for {district['name']}: {e}")
+                    print(f"⚠️ Weather failed for {district['name']}: {repr(e)}")
                     return district['id'], None
 
         print(f"🌤 Fetching weather for {len(self.districts_with_lat_lon)} districts...")
@@ -64,49 +74,45 @@ class PunjabPowerSupply:
                 
         return weather_map
 
-    async def fetch_status_per_subdivision(self, client, subdivision_id, district_weather):
+    async def fetch_status_per_subdivision(self, client, subdivision_id, district_weather, retries=3):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        async with self.limit:
-            try:
-                # print(f"Fetching for subdivision_id: {subdivision_id}", end="\r", flush=True)
-                resp = await client.get(f"{self.default_powercut_url}{subdivision_id}", headers=headers)
-                
-                # If the API returns an error code (403, 429, 500), don't treat it as a power cut
-                if resp.status_code != 200:
-                    return
+        for attempt in range(retries):
+            async with self.limit:
+                try:
+                    resp = await client.get(f"{self.default_powercut_url}{subdivision_id}", headers=headers, timeout=20)
+                    if resp.status_code != 200:
+                        if attempt < retries - 1: continue
+                        return
 
-                text = resp.text
-                
-                # Improved detection: Check if it's the "OK" response
-                if '"status":"ok"' in text and '"reason":"All seems OK"' in text:
-                    self.current_power_status.append({
-                        'id': subdivision_id, 
-                        'power_available': True, 
-                        'checked_on': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                        'temperature': district_weather['temp'] if district_weather else None,
-                        'precipitation': district_weather['precip'] if district_weather else None,
-                        'wind_speed': district_weather['wind'] if district_weather else None,
-                        'wmo_code': district_weather['wmo_code'] if district_weather else None,
-                        'status': 'power_running' # Temporary tag for parser
-                    })
-                else:
-                    # Double check it looks like actual outage data before printing
-                    if '"feeder"' in text:
-                        print(f'⚡ Actual Power cut found at subdivision: {subdivision_id}')
+                    text = resp.text
+                    if '"status":"ok"' in text and '"reason":"All seems OK"' in text:
                         self.current_power_status.append({
-                            'id': subdivision_id, 
-                            'status': text, 
+                            'id': subdivision_id, 'status': 'power_running',
                             'checked_on': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
                             'temperature': district_weather['temp'] if district_weather else None,
                             'precipitation': district_weather['precip'] if district_weather else None,
                             'wind_speed': district_weather['wind'] if district_weather else None,
                             'wmo_code': district_weather['wmo_code'] if district_weather else None
                         })
-            except Exception as e:
-                # If a request fails, we just skip it rather than crashing the whole run
-                pass
+                        return 
+                    elif '"feeder"' in text:
+                        print(f'⚡ Power cut at subdivision: {subdivision_id}')
+                        self.current_power_status.append({
+                            'id': subdivision_id, 'status': text, 
+                            'checked_on': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                            'temperature': district_weather['temp'] if district_weather else None,
+                            'precipitation': district_weather['precip'] if district_weather else None,
+                            'wind_speed': district_weather['wind'] if district_weather else None,
+                            'wmo_code': district_weather['wmo_code'] if district_weather else None
+                        })
+                        return 
+                except Exception as e:
+                    if attempt < retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    print(f"❌ Permanent Failure for {subdivision_id}: {repr(e)}")
     
     # Get district details from subdivision ID
     async def get_subdivision_info(self, target_id):
@@ -235,18 +241,17 @@ class PunjabPowerSupply:
                     # print("ERROR ",e)
                     # print(division)
             
-            results = await asyncio.gather(*tasks)
-            total_expected = 422
-            total_received = len(self.current_power_status)
-            failed = total_expected - total_received
+            await asyncio.gather(*tasks)
+            checked = len(self.current_power_status)
+            outages = sum(1 for x in self.current_power_status if x['status'] != 'power_running')
             
-            print(f"📊 FINAL STATS:")
-            print(f"✅ Success: {total_received}")
-            print(f"❌ Failed/Timed out: {failed}")
-            print(f"⚡ Power cuts detected: {sum(1 for x in self.current_power_status if x.get('status') != 'power_running')}")
+            print(f"\n📊 FINAL STATS:")
+            print(f"✅ Successful Checks: {checked}/422")
+            print(f"❌ Failed (even after retries): {422 - checked}")
+            print(f"⚡ Outages Detected: {outages}")
             # print(f"No. of subdivisions facing power cuts currently = {len(self.current_power_status)}")
             print('saving results !!!')
-            await self.save_current_report()
+            # await self.save_current_report()
             print("DONE")
 
 
