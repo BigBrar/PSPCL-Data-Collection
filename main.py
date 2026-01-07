@@ -20,7 +20,7 @@ class PunjabPowerSupply:
         self.json_file = "district+divisions+subdivisions.json"
         self.current_power_status = []
         print(f"DEBUG: Token ID is {self.pspcl_token_id[:5]}***") # Only print first 5 chars for safety
-        self.limit = asyncio.Semaphore(10)
+        self.limit = asyncio.Semaphore(25)
 
         with open(self.json_file,'r')as file:
             self.districts = json.load(file)
@@ -211,7 +211,14 @@ class PunjabPowerSupply:
         # 1. Get the weather data first
         weather_data = await self.fetch_weather_for_districts()
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        limits = httpx.Limits(max_keepalive_connections=20, max_connections=30)
+
+        async with httpx.AsyncClient(
+            verify=False, 
+            timeout=httpx.Timeout(20.0, connect=40.0), 
+            limits=limits,
+            follow_redirects=True
+        ) as client:
             tasks = []
             for district in self.districts:
                 # no_districts+=1
@@ -229,7 +236,15 @@ class PunjabPowerSupply:
                     # print(division)
             
             results = await asyncio.gather(*tasks)
-            print(f"No. of subdivisions facing power cuts currently = {len(self.current_power_status)}")
+            total_expected = 422
+            total_received = len(self.current_power_status)
+            failed = total_expected - total_received
+            
+            print(f"📊 FINAL STATS:")
+            print(f"✅ Success: {total_received}")
+            print(f"❌ Failed/Timed out: {failed}")
+            print(f"⚡ Power cuts detected: {sum(1 for x in self.current_power_status if x.get('status') != 'power_running')}")
+            # print(f"No. of subdivisions facing power cuts currently = {len(self.current_power_status)}")
             print('saving results !!!')
             await self.save_current_report()
             print("DONE")
